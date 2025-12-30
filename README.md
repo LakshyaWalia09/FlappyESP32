@@ -1,8 +1,8 @@
-# IoT Flappy Bird (ESP32) 🐦
+# IoT Flappy Bird (ESP32) 
 
 A Flappy Bird clone for the ESP32 that features a Wi-Fi web interface for remote control and leaderboard tracking.
 
-## ⚡ Features
+## Features
 
 * **OLED Gameplay:** Smooth graphics on a 128x64 SSD1306 display.
 
@@ -14,7 +14,7 @@ A Flappy Bird clone for the ESP32 that features a Wi-Fi web interface for remote
 
 
 
-## 🛠 Hardware Setup
+## Hardware Setup
 
 * **ESP32 Board**
 * **SSD1306 OLED Display** (I2C)
@@ -28,7 +28,7 @@ A Flappy Bird clone for the ESP32 that features a Wi-Fi web interface for remote
 | **Reset Button** | **5** | Clear Leaderboard |
 | **OLED** | **21 (SDA) / 22 (SCL)** | Display |
 
-## 🚀 How to Run
+## How to Run
 
 1. Install **Adafruit GFX** and **Adafruit SSD1306** libraries in Arduino IDE.
 2. Upload the code to your ESP32.
