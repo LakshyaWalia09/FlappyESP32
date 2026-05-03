@@ -14,18 +14,27 @@ WebServer server(80);
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// --- PIN DEFINITIONS ---
 #define BUTTON_PIN 4
 #define RESET_BUTTON_PIN 5
+#define BUZZER_PIN 13
+#define LED_R 14 // RGB Red
+#define LED_G 27 // RGB Green
+#define LED_B 12 // RGB Blue
 
+// --- BASE GAME SETTINGS ---
 #define BIRD_X_POS 32
 #define BIRD_SIZE 7
 #define GRAVITY 0.3
 #define FLAP_FORCE -3.0
 #define PIPE_WIDTH 12
-#define PIPE_GAP 28
-#define PIPE_SPEED 1
 #define NUM_PIPES 3
 #define NUM_SCORES 10
+
+// --- PROGRESSIVE VARIABLES ---
+float currentPipeSpeed = 1.0;
+int currentPipeGap = 32; // Starts slightly easier, gets harder
+bool isNightMode = false;
 
 float birdY, birdVelocity;
 int score;
@@ -40,9 +49,7 @@ class GameException : public std::exception {
   String msg;
 public:
   GameException(const String &m) : msg(m) {}
-  const char* what() const noexcept override {
-    return msg.c_str();
-  }
+  const char* what() const noexcept override { return msg.c_str(); }
 };
 
 struct ScoreEntry {
@@ -54,7 +61,6 @@ template <typename NameT, typename ScoreT, size_t SIZE>
 class Leaderboard {
 private:
   ScoreEntry entries[SIZE];
-  mutable int topScoreAccessCount = 0;
 
   String keyName(const char* base, size_t idx) const {
     return String(base) + String(idx);
@@ -69,7 +75,6 @@ public:
   }
 
   void addScore(ScoreT sc, const NameT &nm) {
-    if (sc < 0) throw GameException("Score cannot be negative");
     int pos = -1;
     for (size_t i = 0; i < SIZE; ++i) {
       if (sc > entries[i].score) {
@@ -103,11 +108,6 @@ public:
     preferences.end();
   }
 
-  ScoreT getTopScore() const {
-    ++topScoreAccessCount;
-    return entries[0].score;
-  }
-
   const ScoreEntry* getEntries() const { return entries; }
 
   void clear() {
@@ -116,29 +116,12 @@ public:
       entries[i].name = "Player";
     }
   }
-
-  template <typename A, typename B, size_t C>
-  friend void printLeaderboard(const Leaderboard<A,B,C>& lb);
 };
-
-template <typename A, typename B, size_t C>
-void printLeaderboard(const Leaderboard<A,B,C>& lb) {
-  Serial.println("---- Leaderboard ----");
-  const ScoreEntry* e = lb.getEntries();
-  for (size_t i = 0; i < C; ++i) {
-    if (e[i].score > 0) {
-      Serial.print(String(i+1) + ". ");
-      Serial.print(e[i].name);
-      Serial.print(" - ");
-      Serial.println(e[i].score);
-    }
-  }
-}
 
 Leaderboard<String,int,NUM_SCORES> leaderboard;
 
 struct Pipe {
-  int x;
+  float x;
   int gapY;
   bool scored;
 };
@@ -148,17 +131,22 @@ long lastFlapDebounceTime = 0;
 long lastResetDebounceTime = 0;
 long debounceDelay = 150;
 
+// Helper function for COMMON ANODE LEDs (flips the math)
+void setRGB(int r, int g, int b) {
+  analogWrite(LED_R, 255 - r);
+  analogWrite(LED_G, 255 - g);
+  analogWrite(LED_B, 255 - b);
+}
+
 void loadHighScores() { leaderboard.load(); }
 void saveHighScores() { leaderboard.save(); }
 
 void updateHighScores(int newScore, String newName) {
-  try {
-    leaderboard.addScore(newScore, newName);
+  if (newScore > leaderboard.getEntries()[0].score && newScore > 0) {
     newHighScoreSet = true;
-    saveHighScores();
-  } catch (const std::exception &e) {
-    Serial.println(e.what());
   }
+  leaderboard.addScore(newScore, newName);
+  saveHighScores();
 }
 
 void handleRoot() {
@@ -169,11 +157,9 @@ void handleRoot() {
   html += "input,button{width:90%; padding:10px; margin:10px 0; border-radius:5px; border:1px solid #ccc; font-size:16px;}";
   html += "button,input[type=submit]{background:#4CAF50; color:white; cursor:pointer;}";
   html += "h1,h2{margin:0 0 10px;} ol{text-align:left;}</style></head><body>";
-
   html += "<div><h1>Flappy Bird Control</h1>";
   html += "<form action='/save' method='post'><input type='text' name='playerName' value='" + playerName + "'><input type='submit' value='Save Name'></form>";
   html += "<form action='/fly' method='post'><button>FLAP!</button></form></div>";
-
   html += "<div><h2>Leaderboard</h2><ol>";
   const ScoreEntry* entries = leaderboard.getEntries();
   for (int i = 0; i < NUM_SCORES; i++) {
@@ -199,10 +185,17 @@ void resetGame() {
   score = 0;
   gameOver = false;
   newHighScoreSet = false;
+  
+  // Reset difficulty & screen mode
+  currentPipeGap = 32; 
+  currentPipeSpeed = 1.0;
+  isNightMode = false;
+  display.invertDisplay(false);
+  setRGB(0, 0, 0); // Turn LED off
 
   for (int i = 0; i < NUM_PIPES; i++) {
     pipes[i].x = SCREEN_WIDTH + i * (SCREEN_WIDTH / 1.5);
-    pipes[i].gapY = random(15, SCREEN_HEIGHT - PIPE_GAP - 15);
+    pipes[i].gapY = random(15, SCREEN_HEIGHT - currentPipeGap - 15);
     pipes[i].scored = false;
   }
 }
@@ -211,8 +204,8 @@ void drawGame() {
   display.clearDisplay();
   display.fillRect(BIRD_X_POS, (int)birdY, BIRD_SIZE, BIRD_SIZE, SSD1306_WHITE);
   for (int i = 0; i < NUM_PIPES; i++) {
-    display.fillRect(pipes[i].x, 0, PIPE_WIDTH, pipes[i].gapY, SSD1306_WHITE);
-    display.fillRect(pipes[i].x, pipes[i].gapY + PIPE_GAP, PIPE_WIDTH, SCREEN_HEIGHT - (pipes[i].gapY + PIPE_GAP), SSD1306_WHITE);
+    display.fillRect((int)pipes[i].x, 0, PIPE_WIDTH, pipes[i].gapY, SSD1306_WHITE);
+    display.fillRect((int)pipes[i].x, pipes[i].gapY + currentPipeGap, PIPE_WIDTH, SCREEN_HEIGHT - (pipes[i].gapY + currentPipeGap), SSD1306_WHITE);
   }
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -244,33 +237,48 @@ void drawGameOverScreen() {
 void handleGameOver() {
   updateHighScores(score, playerName);
   drawGameOverScreen();
-  printLeaderboard(leaderboard);
+
+  if (newHighScoreSet) {
+    // 🎉 High Score Fanfare & Green LED
+    setRGB(0, 255, 0); 
+    tone(BUZZER_PIN, 523, 150); delay(150); // C5
+    tone(BUZZER_PIN, 659, 150); delay(150); // E5
+    tone(BUZZER_PIN, 784, 150); delay(150); // G5
+    tone(BUZZER_PIN, 1046, 400);            // C6
+  } else {
+    // 💀 Normal Death Beeps & Red LED
+    setRGB(255, 0, 0);
+    for(int i = 0; i < 3; i++) {
+      tone(BUZZER_PIN, 300, 150); 
+      delay(200);                 
+    }
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  setRGB(0, 0, 0); // Start LED off
 
   try { loadHighScores(); } catch (...) {}
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    try { throw GameException("Display failed"); }
-    catch (const std::exception &e) {
-      Serial.println(e.what());
-      for(;;) delay(1000);
-    }
+    Serial.println("Display failed");
+    for(;;) delay(1000);
   }
 
+  WiFi.softAP(ssid);
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-
-  WiFi.softAP(ssid);
-  IPAddress IP = WiFi.softAPIP();
   display.setCursor(0,10); display.println("Connect to Wi-Fi:");
   display.setCursor(0,20); display.println(ssid);
-  display.setCursor(0,40); display.print("IP: "); display.println(IP);
+  display.setCursor(0,40); display.print("IP: "); display.println(WiFi.softAPIP());
   display.display();
   delay(4000);
 
@@ -287,15 +295,11 @@ void loop() {
   server.handleClient();
 
   if (gameOver) {
-    if (webFlapRequested) {
-      resetGame();
-      webFlapRequested = false;
-      return;
-    }
-    if (digitalRead(BUTTON_PIN) == LOW) {
+    if (webFlapRequested || digitalRead(BUTTON_PIN) == LOW) {
       if ((millis() - lastFlapDebounceTime) > debounceDelay) {
         resetGame();
         lastFlapDebounceTime = millis();
+        webFlapRequested = false;
       }
     }
     if (digitalRead(RESET_BUTTON_PIN) == LOW) {
@@ -310,9 +314,13 @@ void loop() {
     return;
   }
 
+  setRGB(0, 0, 0); // Keep LED off during normal play
+
   if (digitalRead(BUTTON_PIN) == LOW || webFlapRequested) {
     if ((millis() - lastFlapDebounceTime) > debounceDelay) {
       birdVelocity = FLAP_FORCE;
+      tone(BUZZER_PIN, 1000, 50); 
+      setRGB(0, 0, 255); // Flash Blue when flapping
       lastFlapDebounceTime = millis();
       webFlapRequested = false;
     }
@@ -322,10 +330,10 @@ void loop() {
   birdY += birdVelocity;
 
   for (int i = 0; i < NUM_PIPES; i++) {
-    pipes[i].x -= PIPE_SPEED;
+    pipes[i].x -= currentPipeSpeed;
     if (pipes[i].x < -PIPE_WIDTH) {
       pipes[i].x = SCREEN_WIDTH;
-      pipes[i].gapY = random(15, SCREEN_HEIGHT - PIPE_GAP - 15);
+      pipes[i].gapY = random(15, SCREEN_HEIGHT - currentPipeGap - 15);
       pipes[i].scored = false;
     }
   }
@@ -334,7 +342,7 @@ void loop() {
 
   for (int i = 0; i < NUM_PIPES; i++) {
     if (BIRD_X_POS + BIRD_SIZE > pipes[i].x && BIRD_X_POS < pipes[i].x + PIPE_WIDTH) {
-      if (birdY < pipes[i].gapY || birdY + BIRD_SIZE > pipes[i].gapY + PIPE_GAP) gameOver = true;
+      if (birdY < pipes[i].gapY || birdY + BIRD_SIZE > pipes[i].gapY + currentPipeGap) gameOver = true;
     }
   }
 
@@ -342,6 +350,23 @@ void loop() {
     if (pipes[i].x < BIRD_X_POS && !pipes[i].scored) {
       score++;
       pipes[i].scored = true;
+
+      // 📈 PROGRESSIVE DIFFICULTY
+      if (score % 5 == 0) {
+        if (currentPipeGap > 18) currentPipeGap -= 2; // Shrink gap slightly
+        currentPipeSpeed += 0.2; // Increase speed slightly
+        tone(BUZZER_PIN, 2000, 80); // Level-up ping
+      }
+
+      // 🌓 DAY/NIGHT MODE TOGGLE
+      if (score % 10 == 0) {
+        isNightMode = !isNightMode;
+        display.invertDisplay(isNightMode);
+        
+        // Mode transition sound effect (Sci-fi sweep)
+        tone(BUZZER_PIN, 800, 80); delay(80);
+        tone(BUZZER_PIN, 1200, 100);
+      }
     }
   }
 
