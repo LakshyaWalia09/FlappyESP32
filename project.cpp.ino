@@ -18,22 +18,26 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUTTON_PIN 4
 #define RESET_BUTTON_PIN 5
 #define BUZZER_PIN 13
-#define LED_R 14 // RGB Red
-#define LED_G 27 // RGB Green
-#define LED_B 12 // RGB Blue
+#define LED_R 14
+#define LED_G 27
+#define LED_B 12
 
-// --- BASE GAME SETTINGS ---
+// --- BASE GAME DEFAULTS ---
 #define BIRD_X_POS 32
 #define BIRD_SIZE 7
-#define GRAVITY 0.3
-#define FLAP_FORCE -3.0
-#define PIPE_WIDTH 12
 #define NUM_PIPES 3
+#define PIPE_WIDTH 12
 #define NUM_SCORES 10
 
-// --- PROGRESSIVE VARIABLES ---
-float currentPipeSpeed = 1.0;
-int currentPipeGap = 32; // Starts slightly easier, gets harder
+// --- MUTABLE GAME MECHANICS (Controllable via Web) ---
+float currentGravity = 0.3;
+float currentFlapForce = -3.0;
+float basePipeSpeed = 1.0;
+int basePipeGap = 32;
+
+// Progressive variables
+float activePipeSpeed;
+int activePipeGap;
 bool isNightMode = false;
 
 float birdY, birdVelocity;
@@ -131,7 +135,7 @@ long lastFlapDebounceTime = 0;
 long lastResetDebounceTime = 0;
 long debounceDelay = 150;
 
-// Helper function for COMMON ANODE LEDs (flips the math)
+// Helper function for COMMON ANODE LEDs
 void setRGB(int r, int g, int b) {
   analogWrite(LED_R, 255 - r);
   analogWrite(LED_G, 255 - g);
@@ -149,27 +153,57 @@ void updateHighScores(int newScore, String newName) {
   saveHighScores();
 }
 
+// --- WEB SERVER HANDLERS ---
+
 void handleRoot() {
-  String html = "<!DOCTYPE html><html><head><title>Flappy Bird Setup</title>";
+  String status = gameOver ? "<span style='color:red; font-weight:bold;'>GAME OVER</span>" : "<span style='color:green; font-weight:bold;'>PLAYING</span>";
+  
+  String html = "<!DOCTYPE html><html><head><title>Flappy Dashboard</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family: Arial; text-align: center; background:#f0f0f0;}";
-  html += "div{background:white; margin:20px auto; padding:20px; border-radius:10px; max-width:400px;}";
-  html += "input,button{width:90%; padding:10px; margin:10px 0; border-radius:5px; border:1px solid #ccc; font-size:16px;}";
-  html += "button,input[type=submit]{background:#4CAF50; color:white; cursor:pointer;}";
-  html += "h1,h2{margin:0 0 10px;} ol{text-align:left;}</style></head><body>";
-  html += "<div><h1>Flappy Bird Control</h1>";
-  html += "<form action='/save' method='post'><input type='text' name='playerName' value='" + playerName + "'><input type='submit' value='Save Name'></form>";
-  html += "<form action='/fly' method='post'><button>FLAP!</button></form></div>";
-  html += "<div><h2>Leaderboard</h2><ol>";
+  html += "<style>body{font-family: Arial; text-align: center; background:#222; color:#fff;}";
+  html += "div.panel{background:#333; margin:15px auto; padding:20px; border-radius:10px; max-width:400px; box-shadow: 0 4px 8px rgba(0,0,0,0.5);}";
+  html += "input,button{width:90%; padding:10px; margin:8px 0; border-radius:5px; border:none; font-size:16px;}";
+  html += "button,input[type=submit]{background:#4CAF50; color:white; cursor:pointer; font-weight:bold;}";
+  html += ".input-group{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}";
+  html += ".input-group input{width:50%;}";
+  html += ".danger{background:#e74c3c !important;} .info{background:#3498db !important;}";
+  html += "h2{margin-top:0; border-bottom:1px solid #555; padding-bottom:10px;} ol{text-align:left;}</style></head><body>";
+  
+  html += "<h1>ESP32 God Mode</h1>";
+
+  // Panel 1: Live Status & Controls
+  html += "<div class='panel'><h2>Live Status</h2>";
+  html += "<p>Status: " + status + " | Current Score: <strong>" + String(score) + "</strong></p>";
+  html += "<form action='/saveName' method='post'><div class='input-group'><label>Player Name:</label><input type='text' name='playerName' value='" + playerName + "'></div><input type='submit' class='info' value='Save Name'></form>";
+  html += "<form action='/fly' method='post'><button>FLAP BIRD</button></form></div>";
+
+  // Panel 2: Physics Engine Engine
+  html += "<div class='panel'><h2>Physics Engine</h2>";
+  html += "<form action='/settings' method='post'>";
+  html += "<div class='input-group'><label>Gravity:</label><input type='number' step='0.1' name='gravity' value='" + String(currentGravity) + "'></div>";
+  html += "<div class='input-group'><label>Flap Force:</label><input type='number' step='0.1' name='flapForce' value='" + String(currentFlapForce) + "'></div>";
+  html += "<div class='input-group'><label>Base Speed:</label><input type='number' step='0.1' name='pipeSpeed' value='" + String(basePipeSpeed) + "'></div>";
+  html += "<div class='input-group'><label>Base Gap:</label><input type='number' name='pipeGap' value='" + String(basePipeGap) + "'></div>";
+  html += "<input type='submit' class='info' value='Apply Mechanics'>";
+  html += "</form></div>";
+
+  // Panel 3: Leaderboard
+  html += "<div class='panel'><h2>Leaderboard</h2><ol>";
   const ScoreEntry* entries = leaderboard.getEntries();
   for (int i = 0; i < NUM_SCORES; i++) {
     if (entries[i].score > 0) html += "<li>" + entries[i].name + " - " + String(entries[i].score) + "</li>";
   }
-  html += "</ol></div></body></html>";
+  html += "</ol></div>";
+
+  // Panel 4: Danger Zone
+  html += "<div class='panel' style='border:2px solid #e74c3c;'><h2>Danger Zone</h2>";
+  html += "<form action='/resetAll' method='post'><button class='danger'>FACTORY RESET (Wipe Data & Settings)</button></form></div>";
+
+  html += "</body></html>";
   server.send(200, "text/html", html);
 }
 
-void handleSave() {
+void handleSaveName() {
   if (server.hasArg("playerName")) playerName = server.arg("playerName");
   handleRoot();
 }
@@ -179,6 +213,32 @@ void handleFly() {
   handleRoot();
 }
 
+void handleSettings() {
+  if (server.hasArg("gravity")) currentGravity = server.arg("gravity").toFloat();
+  if (server.hasArg("flapForce")) currentFlapForce = server.arg("flapForce").toFloat();
+  if (server.hasArg("pipeSpeed")) basePipeSpeed = server.arg("pipeSpeed").toFloat();
+  if (server.hasArg("pipeGap")) basePipeGap = server.arg("pipeGap").toInt();
+  handleRoot();
+}
+
+void handleFactoryReset() {
+  // Wipe Leaderboard
+  leaderboard.clear();
+  saveHighScores();
+  
+  // Restore Default Physics
+  currentGravity = 0.3;
+  currentFlapForce = -3.0;
+  basePipeSpeed = 1.0;
+  basePipeGap = 32;
+  
+  // Restart Game
+  gameOver = true;
+  handleRoot();
+}
+
+// --- GAME LOGIC ---
+
 void resetGame() {
   birdY = SCREEN_HEIGHT / 2;
   birdVelocity = 0;
@@ -186,16 +246,15 @@ void resetGame() {
   gameOver = false;
   newHighScoreSet = false;
   
-  // Reset difficulty & screen mode
-  currentPipeGap = 32; 
-  currentPipeSpeed = 1.0;
+  activePipeGap = basePipeGap; 
+  activePipeSpeed = basePipeSpeed;
   isNightMode = false;
   display.invertDisplay(false);
-  setRGB(0, 0, 0); // Turn LED off
+  setRGB(0, 0, 0); 
 
   for (int i = 0; i < NUM_PIPES; i++) {
     pipes[i].x = SCREEN_WIDTH + i * (SCREEN_WIDTH / 1.5);
-    pipes[i].gapY = random(15, SCREEN_HEIGHT - currentPipeGap - 15);
+    pipes[i].gapY = random(15, SCREEN_HEIGHT - activePipeGap - 15);
     pipes[i].scored = false;
   }
 }
@@ -205,7 +264,7 @@ void drawGame() {
   display.fillRect(BIRD_X_POS, (int)birdY, BIRD_SIZE, BIRD_SIZE, SSD1306_WHITE);
   for (int i = 0; i < NUM_PIPES; i++) {
     display.fillRect((int)pipes[i].x, 0, PIPE_WIDTH, pipes[i].gapY, SSD1306_WHITE);
-    display.fillRect((int)pipes[i].x, pipes[i].gapY + currentPipeGap, PIPE_WIDTH, SCREEN_HEIGHT - (pipes[i].gapY + currentPipeGap), SSD1306_WHITE);
+    display.fillRect((int)pipes[i].x, pipes[i].gapY + activePipeGap, PIPE_WIDTH, SCREEN_HEIGHT - (pipes[i].gapY + activePipeGap), SSD1306_WHITE);
   }
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -239,14 +298,12 @@ void handleGameOver() {
   drawGameOverScreen();
 
   if (newHighScoreSet) {
-    // 🎉 High Score Fanfare & Green LED
     setRGB(0, 255, 0); 
-    tone(BUZZER_PIN, 523, 150); delay(150); // C5
-    tone(BUZZER_PIN, 659, 150); delay(150); // E5
-    tone(BUZZER_PIN, 784, 150); delay(150); // G5
-    tone(BUZZER_PIN, 1046, 400);            // C6
+    tone(BUZZER_PIN, 523, 150); delay(150); 
+    tone(BUZZER_PIN, 659, 150); delay(150); 
+    tone(BUZZER_PIN, 784, 150); delay(150); 
+    tone(BUZZER_PIN, 1046, 400);            
   } else {
-    // 💀 Normal Death Beeps & Red LED
     setRGB(255, 0, 0);
     for(int i = 0; i < 3; i++) {
       tone(BUZZER_PIN, 300, 150); 
@@ -263,7 +320,7 @@ void setup() {
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
-  setRGB(0, 0, 0); // Start LED off
+  setRGB(0, 0, 0); 
 
   try { loadHighScores(); } catch (...) {}
 
@@ -283,8 +340,10 @@ void setup() {
   delay(4000);
 
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/save", HTTP_POST, handleSave);
+  server.on("/saveName", HTTP_POST, handleSaveName);
   server.on("/fly", HTTP_POST, handleFly);
+  server.on("/settings", HTTP_POST, handleSettings);
+  server.on("/resetAll", HTTP_POST, handleFactoryReset);
   server.begin();
 
   randomSeed(analogRead(0));
@@ -314,26 +373,26 @@ void loop() {
     return;
   }
 
-  setRGB(0, 0, 0); // Keep LED off during normal play
+  setRGB(0, 0, 0); 
 
   if (digitalRead(BUTTON_PIN) == LOW || webFlapRequested) {
     if ((millis() - lastFlapDebounceTime) > debounceDelay) {
-      birdVelocity = FLAP_FORCE;
+      birdVelocity = currentFlapForce; // Uses mutable variable
       tone(BUZZER_PIN, 1000, 50); 
-      setRGB(0, 0, 255); // Flash Blue when flapping
+      setRGB(0, 0, 255); 
       lastFlapDebounceTime = millis();
       webFlapRequested = false;
     }
   }
 
-  birdVelocity += GRAVITY;
+  birdVelocity += currentGravity; // Uses mutable variable
   birdY += birdVelocity;
 
   for (int i = 0; i < NUM_PIPES; i++) {
-    pipes[i].x -= currentPipeSpeed;
+    pipes[i].x -= activePipeSpeed; // Progressive speed
     if (pipes[i].x < -PIPE_WIDTH) {
       pipes[i].x = SCREEN_WIDTH;
-      pipes[i].gapY = random(15, SCREEN_HEIGHT - currentPipeGap - 15);
+      pipes[i].gapY = random(15, SCREEN_HEIGHT - activePipeGap - 15);
       pipes[i].scored = false;
     }
   }
@@ -342,7 +401,7 @@ void loop() {
 
   for (int i = 0; i < NUM_PIPES; i++) {
     if (BIRD_X_POS + BIRD_SIZE > pipes[i].x && BIRD_X_POS < pipes[i].x + PIPE_WIDTH) {
-      if (birdY < pipes[i].gapY || birdY + BIRD_SIZE > pipes[i].gapY + currentPipeGap) gameOver = true;
+      if (birdY < pipes[i].gapY || birdY + BIRD_SIZE > pipes[i].gapY + activePipeGap) gameOver = true;
     }
   }
 
@@ -353,17 +412,15 @@ void loop() {
 
       // 📈 PROGRESSIVE DIFFICULTY
       if (score % 5 == 0) {
-        if (currentPipeGap > 18) currentPipeGap -= 2; // Shrink gap slightly
-        currentPipeSpeed += 0.2; // Increase speed slightly
-        tone(BUZZER_PIN, 2000, 80); // Level-up ping
+        if (activePipeGap > 18) activePipeGap -= 2; 
+        activePipeSpeed += 0.2; 
+        tone(BUZZER_PIN, 2000, 80); 
       }
 
       // 🌓 DAY/NIGHT MODE TOGGLE
       if (score % 10 == 0) {
         isNightMode = !isNightMode;
         display.invertDisplay(isNightMode);
-        
-        // Mode transition sound effect (Sci-fi sweep)
         tone(BUZZER_PIN, 800, 80); delay(80);
         tone(BUZZER_PIN, 1200, 100);
       }
